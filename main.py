@@ -7,6 +7,10 @@ import easyocr
 import csv
 import os
 import warnings
+import yaml
+from yaml.loader import SafeLoader
+import streamlit_authenticator as stauth
+import glob
 
 warnings.filterwarnings("ignore")
 
@@ -17,12 +21,48 @@ logging.basicConfig(level=logging.INFO,
                     filename='app.log',)
 logger.info("Starting the app...")
 
+authentication_status = st.session_state.get("authentication_status", False)
+
+
+class Authenticator:
+    def __init__(self, config_path):
+        with open(config_path) as file:
+            self.config = yaml.load(file, Loader=SafeLoader)
+        self.authenticator = stauth.Authenticate(
+            self.config['credentials'],
+            self.config['cookie']['name'],
+            self.config['cookie']['key'],
+            self.config['cookie']['expiry_days'],
+        )
+        self.authentication_status = st.session_state.get(
+            "authentication_status", False)
+
+    def login(self):
+        if not self.authentication_status:
+            self.authenticator.login(
+                location='main',
+                max_login_attempts=1,
+            )
+            self.authentication_status = st.session_state.authentication_status
+
+            if self.authentication_status == False:
+                st.error('Username/password is incorrect')
+            if self.authentication_status == None:
+                st.warning('Please enter your username and password')
+
+    def logout(self):
+        if self.authentication_status:
+            self.authenticator.logout('Logout', 'main')
+
+
 class LicensePlateDetector:
+
     def __init__(self):
         self.reader = easyocr.Reader(['en'])
         self.media_dir = "media"
         if not os.path.exists(self.media_dir):
-            logger.warning("Media directory does not exist. Creating a new one...")
+            logger.warning(
+                "Media directory does not exist. Creating a new one...")
             os.makedirs(self.media_dir)
         self.csv_file_path = 'license_plates.csv'
 
@@ -38,7 +78,8 @@ class LicensePlateDetector:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         bfilter = cv2.bilateralFilter(gray, 11, 11, 17)
         edged = cv2.Canny(bfilter, 30, 200)
-        keypoints = cv2.findContours(edged.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        keypoints = cv2.findContours(
+            edged.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
         contours = imutils.grab_contours(keypoints)
         contours = sorted(contours, key=cv2.contourArea, reverse=True)[:10]
         location = None
@@ -86,7 +127,8 @@ class LicensePlateDetector:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         bfilter = cv2.bilateralFilter(gray, 11, 11, 17)
         edged = cv2.Canny(bfilter, 30, 200)
-        keypoints = cv2.findContours(edged.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        keypoints = cv2.findContours(
+            edged.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
         contours = imutils.grab_contours(keypoints)
         contours = sorted(contours, key=cv2.contourArea, reverse=True)[:10]
         location = None
@@ -130,27 +172,20 @@ st.title("VEHICLE NUMBER PLATE DETECTION AND LOGGING Project")
 # Add a subheader
 st.subheader("Jain University - Ravi Kant Gautam (221VMTR02192)")
 
-# Create a login form
-if 'logged_in' not in st.session_state or not st.session_state['logged_in']:
-    st.header("Login")
-    with st.form(key='login_form'):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        login_button = st.form_submit_button("Login")
-    if login_button:
-        if username == "admin" and password == "admin":
-            # Create a session state for the logged-in user
-            if 'logged_in' not in st.session_state:
-                st.session_state['logged_in'] = True
-            st.session_state['username'] = username
-            # Save credentials to a file
-            logger.info("User logged in successfully")
-            st.success("Logged in successfully!")
-        else:
-            st.error("Invalid username or password")
+authenticator = Authenticator('.streamlit/credential.yml')
 
-if st.session_state.get('logged_in'):
-    st.write("You are logged in!")
+if not authentication_status:
+    with st.spinner("Authenticating..."):
+        try:
+            authenticator.logout()
+        except:
+            pass
+        finally:
+            authenticator.login()
+
+if authentication_status:
+    with st.sidebar:
+        authenticator.logout()
 
     # Create a dropdown to choose between image or video
     option = st.selectbox(
@@ -160,15 +195,34 @@ if st.session_state.get('logged_in'):
 
     anpr = LicensePlateDetector()
 
-
     if option == 'Image':
         # Create a file uploader
-        uploaded_file = st.file_uploader("Choose a file", type=["jpg", "jpeg", "png"], accept_multiple_files=False)
+        uploaded_file = st.file_uploader("Choose a file", type=[
+                                         "jpg", "jpeg", "png"], 
+                                         accept_multiple_files=False, 
+                                         key="image", help="Upload an image file")
 
         if uploaded_file:
             # Display the image
-            st.image(uploaded_file, caption="Uploaded Image", use_column_width=True)
+            # Loop through the images in the specified directory
+            image_files = glob.glob(r'C:\Users\ravikantg\Documents\jain_proj_anpr\media\archive\images\*.jpg') + \
+                          glob.glob(r'C:\Users\ravikantg\Documents\jain_proj_anpr\media\archive\images\*.jpeg') + \
+                          glob.glob(r'C:\Users\ravikantg\Documents\jain_proj_anpr\media\archive\images\*.png')
 
+            for image_file in image_files:
+                st.image(image_file, caption=os.path.basename(image_file), use_column_width=True)
+                with st.spinner(f"Processing the image {os.path.basename(image_file)}..."):
+                    try:
+                        text = anpr.process_image(image_file)
+                        st.success(f"Detected license plate number: {text}")
+                        # write_to_csv = st.checkbox(f"Write {os.path.basename(image_file)} to CSV", key=image_file)
+                        if text:
+                            anpr.write_to_csv(text)
+                            st.success(f"License plate number {text} has been written to {anpr.csv_file_path}")
+                    except Exception as e:
+                        st.error(f"An error occurred while processing {os.path.basename(image_file)}: {e}")
+            st.image(uploaded_file, caption="Uploaded Image",
+                     use_column_width=True)
             file_path = anpr.save_file(uploaded_file)
 
             with st.spinner("Processing the image..."):
@@ -178,22 +232,24 @@ if st.session_state.get('logged_in'):
                     write_to_csv = st.checkbox("Write to CSV")
                     if write_to_csv:
                         anpr.write_to_csv(text)
-                        st.success(f"License plate number {text} has been written to {anpr.csv_file_path}")
+                        st.success(
+                            f"License plate number {text} has been written to {anpr.csv_file_path}")
                 except Exception as e:
                     st.error(f"An error occurred: {e}")
-        else:
-            st.info("Please upload a file")
     else:
         # Create a file uploader
-        uploaded_file = st.file_uploader("Choose a file", type=["mp4", "avi", "mov"], accept_multiple_files=False)
+        uploaded_file = st.file_uploader("Choose a file", type=[
+                                         "mp4", "avi", "mov"], 
+                                         accept_multiple_files=False, 
+                                         key="video", help="Upload a video file")
 
         if uploaded_file:
             # Display the video
-            st.video(uploaded_file, start_time=0)
+            st.video(uploaded_file, start_time=0,
+                     autoplay=True, loop=True)
 
             with st.spinner("Processing the video..."):
                 file_path = anpr.save_file(uploaded_file)
-
                 detected_plates = anpr.process_video(file_path)
 
                 if detected_plates:
@@ -204,8 +260,7 @@ if st.session_state.get('logged_in'):
                     write_to_csv = st.checkbox("Write to CSV")
                     if write_to_csv:
                         anpr.write_multiple_to_csv(detected_plates)
-                        st.success(f"Detected license plates have been written to {csv_file_path}")
+                        st.success(
+                            f"Detected license plates have been written to {csv_file_path}")
                 else:
                     st.info("No license plates detected in the video")
-        else:
-            st.info("Please upload a file")

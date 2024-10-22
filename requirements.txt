@@ -3,3 +3,4 @@ imutils
 opencv-python
 numpy
 easyocr
+streamlit-authenticator
