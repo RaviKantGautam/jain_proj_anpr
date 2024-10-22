@@ -1,0 +1,4 @@
+.history
+venv
+*.log
+*.csv

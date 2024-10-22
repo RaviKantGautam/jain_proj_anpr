@@ -1,0 +1,5 @@
+streamlit
+imutils
+opencv-python
+numpy
+easyocr
